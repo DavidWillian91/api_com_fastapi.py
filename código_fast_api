@@ -1,0 +1,91 @@
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ASCENDING
+import os
+
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+DB_NAME = "crossfit_tdd"
+
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
+
+async def init_indexes():
+    # Exemplo: criar índice único para nome do atleta
+    await db.athletes.create_index([("name", ASCENDING)], unique=True)
+
+
+
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class Athlete(BaseModel):
+    id: Optional[str] = Field(None, alias="_id")
+    name: str
+    age: int
+    level: str  # iniciante, intermediário, avançado
+
+    class Config:
+        allow_population_by_field_name = True
+        schema_extra = {
+            "example": {
+                "name": "João",
+                "age": 25,
+                "level": "intermediário"
+            }
+        }
+
+
+from fastapi import APIRouter, HTTPException
+from app.models import Athlete
+from app.database import db
+from bson import ObjectId
+
+router = APIRouter()
+
+@router.post("/athletes", response_model=Athlete)
+async def create_athlete(athlete: Athlete):
+    result = await db.athletes.insert_one(athlete.dict(by_alias=True, exclude={"id"}))
+    athlete.id = str(result.inserted_id)
+    return athlete
+
+@router.get("/athletes/{athlete_id}", response_model=Athlete)
+async def get_athlete(athlete_id: str):
+    athlete = await db.athletes.find_one({"_id": ObjectId(athlete_id)})
+    if not athlete:
+        raise HTTPException(status_code=404, detail="Atleta não encontrado")
+    return Athlete(**athlete)
+
+
+
+from fastapi import FastAPI
+from app.routes import router
+from app.database import init_indexes
+
+app = FastAPI(title="CrossFit API com TDD")
+
+@app.on_event("startup")
+async def startup_event():
+    await init_indexes()
+
+app.include_router(router, prefix="/api", tags=["Athletes"])
+
+
+import pytest
+from httpx import AsyncClient
+from app.main import app
+
+@pytest.mark.asyncio
+async def test_create_and_get_athlete():
+    async with AsyncClient(app=app, base_url="http://test") as ac:
+        # Criar atleta
+        response = await ac.post("/api/athletes", json={"name": "Maria", "age": 30, "level": "avançado"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "Maria"
+        athlete_id = data["_id"]
+
+        # Buscar atleta criado
+        response = await ac.get(f"/api/athletes/{athlete_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "Maria"
+        assert data["level"] == "avançado"
